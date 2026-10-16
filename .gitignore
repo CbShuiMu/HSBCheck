@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env*
+!.env.example
+.qa/
+*.log
+public/pdf-assets/
+.wrangler/
+.dev.vars*
