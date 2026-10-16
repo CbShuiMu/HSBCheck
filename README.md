@@ -4,7 +4,9 @@ JavaScript + React + Vite 纯前端 HSBC 信用卡 PDF 结单整理工具。红�
 
 ## Cloudflare 部署
 
-生产域名：<https://pulse.cbshuimu.net>。源码保存在 GitHub 私有仓库 `CbShuiMu/HSBCheck`，通过 Cloudflare Workers Builds 跟踪 `main` 分支。
+生产域名：<https://pulse.cbshuimu.net>。源码保存在 GitHub 私有仓库 `CbShuiMu/HSBCheck`，首次静态资源部署和自定义域名绑定已完成。
+
+自动部署状态：仓库连接已建立，尚待在 Cloudflare 控制台 `hsb-check → Settings → Builds` 创建构建 API 令牌并保存 `main` 分支的构建触发器。完成后，推送到 `main` 会自动测试、构建和部署。配置如下：
 
 - Node.js 22.22.0，依赖使用 `npm ci` 安装。
 - 构建命令：`npm test && npm run build`。
