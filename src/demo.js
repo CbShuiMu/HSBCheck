@@ -1,3 +1,4 @@
+// 所有商户、日期和金额均为虚构演示数据，不来自真实结单。
 const entries = [
   ['2026-10-15', 'CITYSUPER · 铜锣湾', '628.50', 'Debit', 'HKD', 'BOOK'],
   ['2026-10-15', 'BLUE BOTTLE COFFEE', '52.00', 'Debit', 'HKD', 'PDNG'],

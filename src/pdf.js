@@ -12,6 +12,7 @@ export async function readStatement(file, { sourceId, password, signal, onProgre
   if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
   const magic = new TextDecoder('latin1').decode(data.subarray(0, 1024));
   if (!magic.includes('%PDF-')) throw new Error('文件内容不是有效 PDF，请使用银行下载的 PDF 结单。');
+  // 指纹只用于本地识别相同文件，不上传原文或摘要。
   const digest = await crypto.subtle.digest('SHA-256', data);
   const fingerprint = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
   const assetRoot = `${import.meta.env.BASE_URL}pdf-assets/`;
@@ -28,6 +29,7 @@ export async function readStatement(file, { sourceId, password, signal, onProgre
       const page = await document.getPage(number);
       const viewport = page.getViewport({ scale: 1 });
       const content = await page.getTextContent();
+      // 将 PDF 左下角坐标转为页面顶部起算，供结单解析器按行列识别。
       pages.push({ page: number, width: viewport.width, height: viewport.height, items: content.items.filter(item => 'str' in item).map(item => ({ text: item.str, x: item.transform[4], y: viewport.height - item.transform[5], width: item.width })) });
       page.cleanup();
     }
@@ -41,6 +43,7 @@ export async function readStatement(file, { sourceId, password, signal, onProgre
     }
     throw error;
   } finally {
+    // 成功、失败和取消都销毁解析任务，释放 Worker 及其文档资源。
     signal?.removeEventListener('abort', abort);
     await task.destroy();
   }

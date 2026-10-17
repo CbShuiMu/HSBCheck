@@ -3,7 +3,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 
-// Bundle PDF.js supporting files locally; no CDN or third-party document service.
+// 将 PDF.js 的字体、CMap 和 WASM 随站点分发，解析时无需第三方 CDN。
 const require = createRequire(import.meta.url);
 const pdfRoot = dirname(require.resolve('pdfjs-dist/package.json'));
 const version = JSON.parse(readFileSync(join(pdfRoot, 'package.json'), 'utf8')).version;

@@ -7,3 +7,14 @@ dist/
 public/pdf-assets/
 .wrangler/
 .dev.vars*
+
+# 本地结单、导出和密钥不进入公开仓库；演示数据应使用虚构文本。
+*.pdf
+*.csv
+*.xlsx
+*.pem
+*.key
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -10,7 +10,7 @@ export function filterTransactions(items, { search = '', direction = 'all', curr
   }).sort((a, b) => sort === 'oldest' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date));
 }
 
-// Integer arithmetic at five decimal places avoids floating-point accumulation.
+// 使用五位小数的整数单位求和，按币种和收支方向分别累计，避免浮点误差。
 export function sumAmounts(items, direction, currency) {
   const units = items.filter(t => t.direction === direction && t.currency === currency).reduce((total, t) => {
     const [whole, fraction = ''] = t.amount.split('.');
@@ -22,7 +22,7 @@ export function sumAmounts(items, direction, currency) {
 export function formatAmount(value, currency = 'HKD') {
   const fractionDigits = new Intl.NumberFormat('zh-HK', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
   const [whole, fraction = ''] = String(value).split('.');
-  // Preserve all source precision, including currencies with nonstandard fractional amounts.
+  // 至少显示币种标准小数位，同时保留原始金额中额外的有效精度。
   const meaningfulFraction = fraction.replace(/0+$/, '');
   const decimals = Math.max(fractionDigits, meaningfulFraction.length);
   return `${BigInt(whole).toLocaleString('en-HK')}${decimals ? `.${fraction.padEnd(decimals, '0').slice(0, decimals)}` : ''}`;
@@ -31,6 +31,7 @@ export function formatAmount(value, currency = 'HKD') {
 export function toCsv(items) {
   const escape = value => {
     let text = String(value ?? '');
+    // 给可能被电子表格解释为公式的文本加单引号，前导空白和控制字符也要检查。
     if (/^[\s\u0000-\u001f]*[=+\-@]/.test(text) || /^[\t\r\n]/.test(text)) text = `'${text}`;
     return `"${text.replaceAll('"', '""')}"`;
   };

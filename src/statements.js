@@ -15,7 +15,7 @@ const signedBalance = money => money.direction === 'credit' ? -cents(money.amoun
 const compact = value => value.replace(/\s+/g, '');
 const join = items => items.map(item => item.text).join(' ').replace(/\s+/g, ' ').trim();
 
-// Group by baseline and then x coordinate, rather than relying on PDF text-stream order.
+// PDF 文字流不保证阅读顺序，先按基线聚行，再按横坐标还原表格列。
 export function groupTextLines(items) {
   const lines = [];
   for (const item of items.filter(item => item.text?.trim()).sort((a, b) => a.y - b.y || a.x - b.x)) {
@@ -36,13 +36,13 @@ export function inferDate(text, statementDate) {
   if (!match || !statementDate) return null;
   const month = MONTHS.indexOf(match[2].toUpperCase());
   let year = Number(statementDate.slice(0, 4));
-  // Statements list day/month only. A December entry in a January statement is last year.
+  // 交易只列日、月；月份晚于结单月份时归入上一年，例如一月结单里的十二月交易。
   if (month + 1 > Number(statementDate.slice(5, 7))) year--;
   const day = dateParts(Number(match[1]), month, year);
   return day && day <= statementDate ? day : null;
 }
 
-// Used only as a local grouping key, not as a security or authentication mechanism.
+// 仅用于页面内账户分组；此哈希不可逆性不足，不能作为匿名化或身份认证手段。
 function accountKey(number) { let hash = 2166136261; for (const char of number) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619); return `${hash >>> 0}-${number.slice(-4)}`; }
 function classify(description, direction) {
   if (direction === 'credit') return /PAYMENT|AUTOPAY|还款|還款/i.test(description) ? 'repayment' : 'credit';
@@ -56,7 +56,7 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
   const occurrences = new Map();
   const cards = new Map();
   const activeCards = new Map();
-  // HKD and RMB account numbers differ, but belong to the same primary card.
+  // 港币与人民币账单账户号码不同，但主卡应归入同一返现组。
   const accounts = pages.map(page => {
     const lines = groupTextLines(page.items);
     const header = lines.find(line => /post\s*date/i.test(line.text) && /trans\s*date/i.test(line.text));
@@ -109,8 +109,7 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
       const trans = join(line.items.filter(item => item.x >= page.width * .165 && item.x < page.width * .225));
       const description = join(line.items.filter(item => item.x >= page.width * .225 && item.x < page.width * .80));
       const amountText = compact(join(line.items.filter(item => item.x >= page.width * .80)));
-      // The table uses uppercase markers. The payment slip's title-case
-      // "Statement balance" label is outside the ledger and is not a balance row.
+      // 仅匹配交易表内的大写结欠标记，避免把付款回条的 "Statement balance" 当成账目。
       const balance = description.match(/^(PREVIOUS\s+BALANCE|STATEMENT\s+BALANCE)\b/);
       if (balance) {
         const money = parseMoney(amountText);
@@ -125,7 +124,7 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
       }
       const dateCandidate = /^\d{1,2}\s*[A-Z]{3}/i.test(post);
       if (!dateCandidate) {
-        // Keep card-wallet or wrapped merchant continuation lines with their original entry.
+        // 钱包标记和商户换行说明归入上一笔交易，不单独生成记录。
         if (previous && line.y - previous.y <= 15 && !post && !trans && description && !/SUMMARY|REWARDCASH|BALANCE|FEES|REGISTRATION|REGISTERED|FOR TERMS|THE ABOVE/i.test(description) && !/^\d[\d\s]{11,}/.test(description)) {
           previous.transaction.notes.push([description, amountText].filter(Boolean).join(' '));
           previous.transaction.rawLine += `\n${line.text}`;
@@ -143,6 +142,7 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
       }
       const card = activeCards.get(identity);
       const signature = JSON.stringify([identity, card.key, day, transactionDay, description, money.amount, money.direction]);
+      // 出现序号保留同一结单内的多笔同额消费；重导同一结单时仍能逐笔匹配。
       const occurrence = (occurrences.get(signature) || 0) + 1;
       occurrences.set(signature, occurrence);
       const transaction = {
@@ -160,9 +160,8 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
   }
   if (!textCount) throw new Error('PDF 没有可读取的文字。扫描件或图片结单暂不支持，请导入银行下载的文字版 PDF。');
   if (!sections.size) throw new Error('未识别到支持的 HSBC 信用卡结单表格。请使用原始电子结单；当前支持所提供的 Pulse 双币卡英文版式。');
-  // Join a supplementary card's HKD/RMB numbers only when the printed holder
-  // name identifies exactly one card per currency. Never merge same-name cards
-  // within one currency or use the shared billing account as their reward key.
+  // 仅当同名持卡人在每个币种中各有唯一副卡时，才合并其双币种返现归属。
+  // 同一币种的同名多卡保持独立，不能用共享账单账户合并副卡额度。
   const byName = new Map();
   for (const card of cards.values()) {
     if (card.type !== 'supplementary' || !card.name) continue;
@@ -189,6 +188,7 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
   return { transactions, cards: [...cards.values()], sections: reconciliations, warnings, pageCount: pages.length, tablePages, statementDates: [...new Set(reconciliations.map(section => section.statementDate))] };
 }
 
+// 每次从剩余文件重建来源集合，移除一份文件不会删除仍有其他来源支持的交易。
 export function mergeStatements(documents) {
   const map = new Map();
   let duplicateCount = 0;

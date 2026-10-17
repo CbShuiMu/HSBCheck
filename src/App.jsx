@@ -63,6 +63,7 @@ export default function App() {
   async function processEntries(entries, suppliedPassword) {
     if (busy.current) return;
     busy.current = true; setLoading(true); setDemo(false); setNotice(''); setError('');
+    // 用批次序号屏蔽清除操作之前的异步回调，避免旧结果重新写回页面。
     const sequence = ++generation.current;
     const abort = new AbortController(); controller.current = abort;
     try {
@@ -70,6 +71,7 @@ export default function App() {
         if (generation.current !== sequence || !docsRef.current.some(document => document.id === entry.id)) continue;
         updateDocument(entry.id, { status: 'parsing', error: '', progress: '正在读取 PDF…' });
         try {
+          // 首次导入才加载 PDF.js，让初始页面免于下载较大的解析器。
           const { readStatement } = await import('./pdf');
           const result = await readStatement(entry.file, {
             sourceId: entry.id, password: suppliedPassword, signal: abort.signal,
