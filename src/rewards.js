@@ -1,6 +1,7 @@
 // Monetary values use integer units of 1/100000 CNY or HKD throughout.
 export const MONEY_SCALE = 100000n;
 export const ANNUAL_CAP = 80000n * MONEY_SCALE;
+export const PULSE_HALF_YEAR_CAP = 80000n * MONEY_SCALE;
 const FX_SCALE = 10000000000n;
 const nonnegative = value => value > 0n ? value : 0n;
 const minimum = (left, right) => left < right ? left : right;
@@ -50,16 +51,35 @@ export function rewardPendingReason(transaction, override = 'auto') {
   return paymentChannel(transaction, override).uncertain ? '支付方式待确认，暂不计返现，也不占用年度额度' : '';
 }
 
-function bonusPool(gross, refunds) {
+function bonusPool(gross, refunds, cap = ANNUAL_CAP) {
   // A refund claws back the award but never restores the gross-spend allowance.
-  const used = minimum(gross, ANNUAL_CAP);
+  const used = minimum(gross, cap);
   const beforeRefund = used * 2n / 100n;
   const clawback = minimum(beforeRefund, refunds * 2n / 100n);
-  return { gross, used, refunds, remaining: ANNUAL_CAP - used, overCap: nonnegative(gross - ANNUAL_CAP), beforeRefund, clawback, cashback: beforeRefund - clawback, progress: Number(used) / Number(ANNUAL_CAP) * 100 };
+  return { gross, cap, used, refunds, remaining: cap - used, overCap: nonnegative(gross - cap), beforeRefund, clawback, cashback: beforeRefund - clawback, progress: Number(used) / Number(cap) * 100 };
+}
+
+export function groupRewardCards(transactions, cards = []) {
+  const groups = new Map();
+  const register = card => {
+    if (!groups.has(card.id)) groups.set(card.id, { ...card, records: [] });
+    else if (card.currency === 'CNY') Object.assign(groups.get(card.id), card);
+  };
+  for (const card of cards) register(card);
+  for (const transaction of transactions) {
+    const id = transaction.rewardCardId || 'primary';
+    if (!groups.has(id)) register({ id, type: transaction.cardType || 'primary', last4: transaction.last4 || '', name: transaction.cardName || '' });
+    groups.get(id).records.push(transaction);
+  }
+  if (!groups.size) register({ id: 'primary', type: 'primary', last4: '', name: '' });
+  return [...groups.values()].sort((a, b) => Number(a.type === 'supplementary') - Number(b.type === 'supplementary'));
 }
 
 export function calculateRewards(transactions, { today = hongKongToday(), hkdCnyRate = null, overrides = {} } = {}) {
   const start = `${today.slice(0, 4)}-01-01`;
+  const july = `${today.slice(0, 4)}-07-01`;
+  const halfIndex = today < july ? 0 : 1;
+  const pulseSpend = [0n, 0n];
   let cnyGross = 0n, cnyRefunds = 0n, hkdGross = 0n, hkdRefunds = 0n;
   let pulseGross = 0n, worldRefunds = 0n, pulseRefunds = 0n;
   let included = 0, pending = 0, unknownChannels = 0, uncertainRefunds = 0, excluded = 0, otherCurrency = 0;
@@ -92,7 +112,10 @@ export function calculateRewards(transactions, { today = hongKongToday(), hkdCny
       }
     } else {
       cnyGross += amount;
-      if (channel.pulse) pulseGross += amount;
+      if (channel.pulse) {
+        pulseGross += amount;
+        pulseSpend[transaction.day < july ? 0 : 1] += amount;
+      }
     }
   }
   const cnyBase = nonnegative(cnyGross - cnyRefunds) * 4n / 1000n;
@@ -102,7 +125,19 @@ export function calculateRewards(transactions, { today = hongKongToday(), hkdCny
   const hkdConvertedCny = hkdBase === 0n ? 0n : rate ? (hkdBase * rate + FX_SCALE / 2n) / FX_SCALE : null;
   const baseTotal = hkdConvertedCny === null ? null : cnyBase + hkdConvertedCny;
   const world = bonusPool(cnyGross, worldRefunds);
-  const pulse = bonusPool(pulseGross, pulseRefunds);
+  const periods = pulseSpend.map((gross, index) => ({
+    ...bonusPool(gross, 0n, PULSE_HALF_YEAR_CAP),
+    start: index ? july : start,
+    end: `${today.slice(0, 4)}-${index ? '12-31' : '06-30'}`,
+    label: index ? '下半年' : '上半年',
+  }));
+  const pulseBeforeRefund = periods.reduce((total, period) => total + period.beforeRefund, 0n);
+  const pulseClawback = minimum(pulseBeforeRefund, pulseRefunds * 2n / 100n);
+  // Annual cashback includes both independently capped halves. Refunds claw
+  // back annual earnings even across July, without releasing either allowance.
+  const pulse = { ...periods[halfIndex], periods, annualGross: pulseGross, refunds: pulseRefunds,
+    beforeRefund: pulseBeforeRefund, clawback: pulseClawback, cashback: pulseBeforeRefund - pulseClawback,
+    nextReset: halfIndex ? `${Number(today.slice(0, 4)) + 1}-01-01` : july };
   return { start, today, included, pending, excluded, otherCurrency, unknownChannels, uncertainRefunds,
     base: { cny: cnyBase, hkd: hkdBase, hkdConvertedCny, totalCny: baseTotal, cnyGross, cnyRefunds, hkdGross, hkdRefunds }, world, pulse,
     totalCny: baseTotal === null ? null : baseTotal + world.cashback + pulse.cashback };

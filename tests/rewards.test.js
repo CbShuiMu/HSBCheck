@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ANNUAL_CAP, calculateRewards, hongKongToday, moneyUnits, paymentChannel, rewardMoney } from '../src/rewards.js';
+import { ANNUAL_CAP, calculateRewards, groupRewardCards, hongKongToday, moneyUnits, paymentChannel, rewardMoney } from '../src/rewards.js';
 import { fetchHkdCnyRate, RATE_URL } from '../src/exchange-rate.js';
 import { mergeStatements } from '../src/statements.js';
 
@@ -107,6 +107,60 @@ test('bonus programs have independent allowances', () => {
   assert.equal(rewards.pulse.used, moneyUnits('20000.00'));
   assert.equal(rewards.pulse.progress, 25);
   assert.equal(rewardMoney(rewards.totalCny), '2480.00');
+});
+
+test('Pulse resets on July 1 while annual cashback retains both independently capped halves', () => {
+  const records = [transaction({ id: 'first', day: '2026-06-30', amount: '100000.00', notes: ['APPLE PAY'] }), transaction({ id: 'second', day: '2026-07-01', amount: '100000.00', notes: ['APPLE PAY'] })];
+  const june = calculate(records, { today: '2026-06-30' });
+  assert.equal(june.pulse.label, '上半年'); assert.equal(june.pulse.nextReset, '2026-07-01');
+  assert.equal(june.pulse.used, ANNUAL_CAP); assert.equal(rewardMoney(june.pulse.cashback), '1600.00');
+  const julyBeforeSpending = calculate([records[0]], { today: '2026-07-01' });
+  assert.equal(julyBeforeSpending.pulse.used, 0n); assert.equal(julyBeforeSpending.pulse.remaining, ANNUAL_CAP);
+  assert.equal(rewardMoney(julyBeforeSpending.pulse.cashback), '1600.00');
+  const july = calculate(records, { today: '2026-07-01' });
+  assert.equal(july.pulse.label, '下半年'); assert.equal(july.pulse.nextReset, '2027-01-01');
+  assert.equal(rewardMoney(july.pulse.cashback), '3200.00');
+  assert.equal(july.pulse.periods[0].used, ANNUAL_CAP); assert.equal(july.pulse.periods[1].used, ANNUAL_CAP);
+  assert.equal(rewardMoney(july.world.cashback), '1600.00');
+  assert.equal(rewardMoney(july.base.totalCny), '800.00');
+  const january = calculate(records, { today: '2027-01-01' });
+  assert.equal(january.totalCny, 0n); assert.equal(january.pulse.used, 0n);
+  assert.equal(january.pulse.nextReset, '2027-07-01');
+});
+
+test('Pulse uses posting date at the half-year boundary and refunds never restore either half', () => {
+  const spend = transaction({ id: 'spend', day: '2026-06-30', amount: '80000.00', notes: ['APPLE PAY'] });
+  const refund = transaction({ id: 'refund', day: '2026-07-01', direction: 'credit', category: 'credit', amount: '10000.00', notes: ['APPLE PAY'] });
+  const rewards = calculate([spend, refund]);
+  assert.equal(rewardMoney(rewards.pulse.cashback), '1400.00');
+  assert.equal(rewards.pulse.periods[0].remaining, 0n); assert.equal(rewards.pulse.remaining, ANNUAL_CAP);
+  const boundary = calculate([transaction({ day: '2026-07-01', transactionDay: '2026-06-30', notes: ['APPLE PAY'] })]);
+  assert.equal(boundary.pulse.periods[0].used, 0n); assert.equal(boundary.pulse.periods[1].used, moneyUnits('100.00'));
+});
+
+test('primary and supplementary cards have independent base, world and half-year Pulse rewards', () => {
+  const records = [
+    transaction({ id: 'main', rewardCardId: 'main', cardType: 'primary', amount: '100000.00', notes: ['APPLE PAY'] }),
+    transaction({ id: 'sup1', rewardCardId: 'sup1', cardType: 'supplementary', amount: '100000.00', notes: ['APPLE PAY'] }),
+    transaction({ id: 'sup2', rewardCardId: 'sup2', cardType: 'supplementary', amount: '100.00', notes: ['APPLE PAY'] }),
+    transaction({ id: 'refund', rewardCardId: 'sup2', cardType: 'supplementary', amount: '100.00', notes: ['APPLE PAY'], direction: 'credit', category: 'credit' }),
+    transaction({ id: 'hkd', rewardCardId: 'sup1', cardType: 'supplementary', currency: 'HKD', amount: '1000.00' }),
+  ];
+  const groups = groupRewardCards(records);
+  assert.deepEqual(groups.map(group => group.type), ['primary', 'supplementary', 'supplementary']);
+  const [main, first, second] = groups.map(group => calculate(group.records));
+  assert.equal(rewardMoney(main.totalCny), '3600.00'); assert.equal(rewardMoney(first.totalCny), '3603.40');
+  assert.equal(second.totalCny, 0n); assert.equal(second.world.used, moneyUnits('100.00'));
+  assert.equal(main.world.used, ANNUAL_CAP); assert.equal(first.world.used, ANNUAL_CAP);
+  const corrected = calculate(groups[2].records, { overrides: { sup2: { channel: 'exclude' }, refund: { channel: 'exclude' } } });
+  assert.equal(corrected.world.used, 0n); assert.equal(calculate(groups[0].records).world.used, ANNUAL_CAP);
+});
+
+test('card grouping retains zero-spend cards, combines currency metadata and supports legacy records', () => {
+  const cards = [{ id: 'main', type: 'primary', currency: 'HKD', last4: '1111' }, { id: 'main', type: 'primary', currency: 'CNY', last4: '2222' }, { id: 'sup', type: 'supplementary', currency: 'CNY', last4: '3333' }];
+  const groups = groupRewardCards([], cards);
+  assert.equal(groups.length, 2); assert.equal(groups[0].last4, '2222'); assert.equal(groups[1].records.length, 0);
+  assert.equal(groupRewardCards([]).length, 1); assert.equal(groupRewardCards([transaction()])[0].records.length, 1);
 });
 test('a complete refund removes cashback but never releases either allowance', () => {
   const rewards = calculate([transaction({ notes: ['APPLE PAY'] }), transaction({ id: '2', notes: ['APPLE PAY'], category: 'credit', direction: 'credit' })]);

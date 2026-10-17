@@ -57,6 +57,57 @@ test('multiple HKD and CNY sub-accounts reconcile independently, including zero-
   assert.equal(result.sections.length, 2); assert.equal(result.sections[0].transactionCount, 0);
   assert.ok(result.sections.every(section => section.status === 'matched'));
 });
+
+test('supplementary card ownership survives page breaks and shared-account balance reconciliation', () => {
+  const result = parse([
+    page({ closing: null, rows: [
+      [chunk('0001 0002 0003 0004 EXAMPLE MAIN', 140, 130)], row('01SEP', '31AUG', 'ALIPAY MAIN', '10.00', 140),
+      [chunk('0001 0002 0003 0005 EXAMPLE FIRST', 140, 165)], row('01SEP', '31AUG', 'FIRST STORE', '20.00', 180), [chunk('APPLE PAY-MOBILE:1234', 140, 190)],
+    ] }),
+    page({ number: 2, date: '', opening: null, closing: '100.00', rows: [
+      row('02SEP', '01SEP', 'FIRST CONTINUED', '30.00', 140), [chunk('UNIONPAY QR', 140, 150)],
+      [chunk('0001 0002 0003 0006 EXAMPLE SECOND', 140, 180)], row('02SEP', '01SEP', 'ALIPAY SECOND', '40.00', 195),
+    ] }),
+  ]);
+  assert.equal(result.transactions.length, 4); assert.equal(result.sections[0].status, 'matched'); assert.equal(result.warnings.length, 0);
+  const [main, first, continuation, second] = result.transactions;
+  assert.equal(main.cardType, 'primary'); assert.equal(main.last4, '0004');
+  assert.equal(first.cardType, 'supplementary'); assert.equal(first.last4, '0005');
+  assert.equal(first.billingLast4, '0004'); assert.equal(first.account, 'CNY ···· 0005（副卡）');
+  assert.equal(first.rewardCardId, continuation.rewardCardId); assert.notEqual(first.rewardCardId, second.rewardCardId);
+  assert.deepEqual(first.notes, ['APPLE PAY-MOBILE:1234']); assert.deepEqual(continuation.notes, ['UNIONPAY QR']);
+  assert.equal(continuation.sources[0].page, 2); assert.equal(new Set(result.cards.map(card => card.id)).size, 3);
+});
+
+test('identical purchases on different cards retain separate identities and deduplicate on reimport', () => {
+  const input = [page({ closing: '25.00', rows: [
+    row('01SEP', '31AUG', 'ALIPAY STORE', '12.50', 140),
+    [chunk('0001 0002 0003 0005 EXAMPLE FIRST', 140, 165)], row('01SEP', '31AUG', 'ALIPAY STORE', '12.50', 180),
+  ] })];
+  const first = parse(input, 'first'); const second = parse(input, 'second');
+  assert.notEqual(first.transactions[0].id, first.transactions[1].id);
+  const merged = mergeStatements([{ result: first }, { result: second }]);
+  assert.equal(merged.transactions.length, 2); assert.equal(merged.duplicateCount, 2);
+  assert.equal(new Set(merged.transactions.map(item => item.rewardCardId)).size, 2);
+});
+
+test('unambiguous holder headings join supplementary HKD and CNY card numbers', () => {
+  const result = parse([
+    page({ currency: 'HKD', closing: '10.00', rows: [[chunk('0001 0002 0003 0005 EXAMPLE FIRST', 140, 130)], row('01SEP', '31AUG', 'HK STORE', '10.00', 140)] }),
+    page({ number: 2, closing: '20.00', rows: [[chunk('0001 0002 0003 0006 EXAMPLE FIRST', 140, 130)], row('01SEP', '31AUG', 'ALIPAY STORE', '20.00', 140)] }),
+  ]);
+  assert.equal(result.transactions[0].rewardCardId, result.transactions[1].rewardCardId);
+  assert.notEqual(result.transactions[0].last4, result.transactions[1].last4);
+  assert.ok(result.sections.every(section => section.status === 'matched'));
+});
+
+test('two same-name supplementary cards in one currency must not share reward allowance', () => {
+  const result = parse([page({ closing: '20.00', rows: [
+    [chunk('0001 0002 0003 0005 EXAMPLE FIRST', 140, 130)], row('01SEP', '31AUG', 'ALIPAY STORE', '10.00', 140),
+    [chunk('0001 0002 0003 0006 EXAMPLE FIRST', 140, 170)], row('01SEP', '31AUG', 'ALIPAY STORE', '10.00', 180),
+  ] })]);
+  assert.notEqual(result.transactions[0].rewardCardId, result.transactions[1].rewardCardId);
+});
 test('keeps legitimate identical transactions and merges their occurrences across duplicate imports', () => {
   const input = [page({ rows: [row('01SEP', '31AUG', 'EXAMPLE STORE', '12.50', 140), row('01SEP', '31AUG', 'EXAMPLE STORE', '12.50', 155)], closing: '25.00' })];
   const first = parse(input, 'first'); const second = parse(input, 'second');

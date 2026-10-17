@@ -54,6 +54,23 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
   const transactions = [];
   const warnings = [];
   const occurrences = new Map();
+  const cards = new Map();
+  const activeCards = new Map();
+  // HKD and RMB account numbers differ, but belong to the same primary card.
+  const accounts = pages.map(page => {
+    const lines = groupTextLines(page.items);
+    const header = lines.find(line => /post\s*date/i.test(line.text) && /trans\s*date/i.test(line.text));
+    return header ? compact(lines.filter(line => line.y < header.y).map(line => line.text).join(' ')).match(/Accountnumber(\d{12,19})(HKD|RMB|CNY)Sub-?account/i) : null;
+  }).filter(Boolean);
+  const familyId = accountKey((accounts.find(match => /RMB|CNY/i.test(match[2])) || accounts[0] || [null, 'unknown'])[1]);
+  function registerCard(number, currency, name = '', primary = false) {
+    const key = accountKey(number);
+    const id = primary ? `${familyId}:primary` : `${familyId}:supplementary:${key}`;
+    const card = cards.get(`${key}:${currency}`) || { id, key, familyId, type: primary ? 'primary' : 'supplementary', last4: number.slice(-4), currency, name };
+    if (name) card.name = name;
+    cards.set(`${key}:${currency}`, card);
+    return card;
+  }
   let statementDate = '';
   let tablePages = 0;
   let textCount = 0;
@@ -78,8 +95,16 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
     if (!sections.has(identity)) sections.set(identity, { id: identity, last4, currency, statementDate, opening: null, closing: null, transactionCount: 0, pages: [] });
     const section = sections.get(identity);
     section.pages.push(page.page);
+    if (!activeCards.has(identity)) activeCards.set(identity, registerCard(accountMatch[1], currency, '', true));
     let previous = null;
     for (const line of lines.filter(line => line.y > header.y + 4)) {
+      const cardHeading = line.text.match(/^(\d[\d ]{10,26}\d)\s+([A-Z][A-Z .'-]+)$/);
+      if (cardHeading && /^\d{12,19}$/.test(compact(cardHeading[1]))) {
+        const number = compact(cardHeading[1]);
+        activeCards.set(identity, registerCard(number, currency, cardHeading[2].trim(), number === accountMatch[1]));
+        previous = null;
+        continue;
+      }
       const post = join(line.items.filter(item => item.x < page.width * .165));
       const trans = join(line.items.filter(item => item.x >= page.width * .165 && item.x < page.width * .225));
       const description = join(line.items.filter(item => item.x >= page.width * .225 && item.x < page.width * .80));
@@ -116,14 +141,16 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
         previous = null;
         continue;
       }
-      const signature = JSON.stringify([identity, day, transactionDay, description, money.amount, money.direction]);
+      const card = activeCards.get(identity);
+      const signature = JSON.stringify([identity, card.key, day, transactionDay, description, money.amount, money.direction]);
       const occurrence = (occurrences.get(signature) || 0) + 1;
       occurrences.set(signature, occurrence);
       const transaction = {
         id: `${signature}:${occurrence}`, date: `${day}T00:00:00+08:00`, day, transactionDay,
         description, ...money, currency, category: classify(description, money.direction),
         status: 'booked', bankStatus: '结单已记账', reference: `第 ${page.page} 页`,
-        last4, account: `${currency} ···· ${last4}`, statementDate, sectionId: identity,
+        last4: card.last4, account: `${currency} ···· ${card.last4}${card.type === 'supplementary' ? '（副卡）' : ''}`, statementDate, sectionId: identity,
+        rewardCardId: card.id, cardKey: card.key, cardType: card.type, cardName: card.name, billingLast4: last4,
         notes: [], rawLine: line.text,
         sources: [{ sourceId, fileName, page: page.page }],
       };
@@ -133,6 +160,23 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
   }
   if (!textCount) throw new Error('PDF 没有可读取的文字。扫描件或图片结单暂不支持，请导入银行下载的文字版 PDF。');
   if (!sections.size) throw new Error('未识别到支持的 HSBC 信用卡结单表格。请使用原始电子结单；当前支持所提供的 Pulse 双币卡英文版式。');
+  // Join a supplementary card's HKD/RMB numbers only when the printed holder
+  // name identifies exactly one card per currency. Never merge same-name cards
+  // within one currency or use the shared billing account as their reward key.
+  const byName = new Map();
+  for (const card of cards.values()) {
+    if (card.type !== 'supplementary' || !card.name) continue;
+    const name = card.name.replace(/\s+/g, ' ').toUpperCase();
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push(card);
+  }
+  const aliases = new Map();
+  for (const matches of byName.values()) {
+    if (new Set(matches.map(card => card.currency)).size !== matches.length) continue;
+    const preferred = matches.find(card => card.currency === 'CNY') || matches[0];
+    for (const card of matches) { aliases.set(card.id, preferred.id); card.id = preferred.id; }
+  }
+  for (const transaction of transactions) transaction.rewardCardId = aliases.get(transaction.rewardCardId) || transaction.rewardCardId;
   const reconciliations = [...sections.values()].map(section => {
     const entries = transactions.filter(t => t.sectionId === section.id);
     const net = entries.reduce((sum, t) => sum + (t.direction === 'debit' ? cents(t.amount) : -cents(t.amount)), 0n);
@@ -142,7 +186,7 @@ export function parseStatementPages(pages, { sourceId, fileName }) {
     if (status !== 'matched') warnings.push({ page: section.pages[0], message: `${section.currency} 尾号 ${section.last4}：${status === 'mismatch' ? `结欠核对差额 ${decimal(difference)}，请检查是否有未识别交易。` : '缺少上期或本期结欠，暂不能完成余额核对。'}` });
     return { ...section, status, difference: difference === null ? null : decimal(difference) };
   });
-  return { transactions, sections: reconciliations, warnings, pageCount: pages.length, tablePages, statementDates: [...new Set(reconciliations.map(section => section.statementDate))] };
+  return { transactions, cards: [...cards.values()], sections: reconciliations, warnings, pageCount: pages.length, tablePages, statementDates: [...new Set(reconciliations.map(section => section.statementDate))] };
 }
 
 export function mergeStatements(documents) {
