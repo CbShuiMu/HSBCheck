@@ -17,7 +17,12 @@
     "react-dom": "19.2.0"
   },
   "devDependencies": {
-    "vite": "6.4.1",
+    "vite": "6.4.4",
     "wrangler": "4.151.0"
+  },
+  "description": "Browser-local HSBC PULSE PDF statement organizer and cashback estimator",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
   }
 }
