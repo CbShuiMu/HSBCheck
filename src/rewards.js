@@ -1,6 +1,6 @@
-// Monetary values use integer units of 1/100000 CNY or HKD throughout.
+// 金额统一按十万分之一元的整数计算，避免浮点误差；展示时才舍入到分。
 export const MONEY_SCALE = 100000n;
-export const ANNUAL_CAP = 80000n * MONEY_SCALE;
+export const ANNUAL_CAP = 100000n * MONEY_SCALE;
 export const PULSE_HALF_YEAR_CAP = 80000n * MONEY_SCALE;
 const FX_SCALE = 10000000000n;
 const nonnegative = value => value > 0n ? value : 0n;
@@ -52,7 +52,7 @@ export function rewardPendingReason(transaction, override = 'auto') {
 }
 
 function bonusPool(gross, refunds, cap = ANNUAL_CAP) {
-  // A refund claws back the award but never restores the gross-spend allowance.
+  // 退款扣回返现，但不释放按累计消费占用的额度；扣回金额不超过已赚取返现。
   const used = minimum(gross, cap);
   const beforeRefund = used * 2n / 100n;
   const clawback = minimum(beforeRefund, refunds * 2n / 100n);
@@ -89,8 +89,8 @@ export function calculateRewards(transactions, { today = hongKongToday(), hkdCny
     const override = overrides[transaction.id] || {};
     const channel = paymentChannel(transaction, override.channel);
     if (rewardExclusionReason(transaction) || channel.key === 'exclude') { excluded++; continue; }
-    // Pending records stay visible but cannot earn/claw back rewards or consume allowance.
-    // A payment-channel override cannot confirm an unposted bank transaction.
+    // 待确认交易保留在明细中，但不赚取或扣回返现，也不占用额度。
+    // 手动确认支付方式不能替代银行入账状态。
     if (rewardPendingReason(transaction, override.channel)) {
       pending++;
       if (channel.uncertain && transaction.direction !== 'credit') unknownChannels++;
@@ -122,6 +122,7 @@ export function calculateRewards(transactions, { today = hongKongToday(), hkdCny
   const hkdBase = nonnegative(hkdGross - hkdRefunds) * 4n / 1000n;
   const validRate = typeof hkdCnyRate === 'number' && Number.isFinite(hkdCnyRate) && hkdCnyRate > 0 && hkdCnyRate < 1000;
   const rate = validRate ? BigInt(Math.round(hkdCnyRate * Number(FX_SCALE))) : null;
+  // 没有可靠汇率时保留 null，避免把无法折算的港币返现显示为零。
   const hkdConvertedCny = hkdBase === 0n ? 0n : rate ? (hkdBase * rate + FX_SCALE / 2n) / FX_SCALE : null;
   const baseTotal = hkdConvertedCny === null ? null : cnyBase + hkdConvertedCny;
   const world = bonusPool(cnyGross, worldRefunds);
@@ -133,8 +134,7 @@ export function calculateRewards(transactions, { today = hongKongToday(), hkdCny
   }));
   const pulseBeforeRefund = periods.reduce((total, period) => total + period.beforeRefund, 0n);
   const pulseClawback = minimum(pulseBeforeRefund, pulseRefunds * 2n / 100n);
-  // Annual cashback includes both independently capped halves. Refunds claw
-  // back annual earnings even across July, without releasing either allowance.
+  // 全年返现累加两个独立封顶的半年；跨半年退款扣回全年返现，仍不释放任一半年额度。
   const pulse = { ...periods[halfIndex], periods, annualGross: pulseGross, refunds: pulseRefunds,
     beforeRefund: pulseBeforeRefund, clawback: pulseClawback, cashback: pulseBeforeRefund - pulseClawback,
     nextReset: halfIndex ? `${Number(today.slice(0, 4)) + 1}-01-01` : july };
