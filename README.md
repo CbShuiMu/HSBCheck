@@ -79,6 +79,39 @@ npm run preview
 
 `package.json` 的 `private: true` 用于防止误发布到 npm，不影响 GitHub 仓库公开或静态站点部署。
 
+### 使用 Docker 部署
+
+安装并启动 [Docker](https://docs.docker.com/get-started/get-docker/)（Windows / macOS 使用 Linux 容器），在项目根目录执行：
+
+```bash
+docker build --pull -t hsb-check:local .
+docker run -d --name hsb-check --restart unless-stopped -p 127.0.0.1:8080:80 hsb-check:local
+```
+
+打开 [http://localhost:8080](http://localhost:8080)。无需在宿主机安装 Node.js；镜像使用 Node.js 22.22.0 安装锁定依赖、运行测试并构建，再由 Nginx 提供完整的 `dist/`，包含 PDF.js Worker、字体、CMap、WASM 及许可证。首次构建需要联网下载基础镜像和 npm 依赖。
+
+默认仅允许本机访问。服务器部署时，在宿主机通过 Nginx、Caddy 等反向代理将 HTTPS 域名转发到 `127.0.0.1:8080`，并在站点根路径 `/` 提供应用。容器内提供 HTTP；远程浏览器需通过 HTTPS 访问，才能使用 Web Crypto。若反向代理也在 Docker 中，可将两者接入同一 Docker 网络，代理到 `hsb-check:80`。
+
+容器只提供静态网页，无需数据库、结单目录挂载或业务密钥；结单仍在浏览器内处理，刷新页面会清空本次数据。
+
+查看运行状态与日志：
+
+```bash
+docker ps --filter name=hsb-check
+docker logs hsb-check
+```
+
+更新代码后重新构建并替换容器：
+
+```bash
+docker build --pull -t hsb-check:local .
+docker stop hsb-check
+docker rm hsb-check
+docker run -d --name hsb-check --restart unless-stopped -p 127.0.0.1:8080:80 hsb-check:local
+```
+
+停止并移除部署可执行 `docker stop hsb-check` 和 `docker rm hsb-check`。
+
 ## 代码导览
 
 ```text

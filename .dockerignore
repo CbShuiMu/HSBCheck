@@ -1,0 +1,27 @@
+# Only send the inputs needed to build and serve the application.
+**
+!package.json
+!package-lock.json
+!index.html
+!vite.config.js
+!src/
+!src/**
+!public/
+!public/**
+!tests/
+!tests/**
+!docker/
+!docker/nginx.conf
+
+# Regenerate PDF.js assets from the locked dependency during the build.
+public/pdf-assets/
+
+# Keep local data and credentials out of the build context.
+**/.env*
+**/.dev.vars*
+**/*.pdf
+**/*.csv
+**/*.xlsx
+**/*.pem
+**/*.key
+**/*.log
