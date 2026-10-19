@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { groupTextLines, inferDate, mergeStatements, parseMoney, parseStatementPages } from '../src/statements.js';
+import { calculateRewards, moneyUnits, rewardMoney } from '../src/rewards.js';
 
 const chunk = (text, x, y) => ({ text, x, y, width: text.length * 4 });
 const row = (post, trans, description, amount, y) => [chunk(post, 70, y), chunk(trans, 103, y), chunk(description, 140, y), chunk(amount, 540, y)];
@@ -46,6 +47,19 @@ test('continues transactions on following pages without statement date repetitio
 test('wallet continuation is retained without becoming another transaction', () => {
   const result = parse([page({ rows: [row('01SEP', '31AUG', 'EXAMPLE STORE', '12.50', 140), [chunk('APPLE PAY-MOBILE:1234', 140, 148.4)]] })]);
   assert.equal(result.transactions.length, 1); assert.deepEqual(result.transactions[0].notes, ['APPLE PAY-MOBILE:1234']);
+});
+
+test('parsed overseas foreign spend in the HKD sub-account earns world while local and DCC spend do not', () => {
+  const result = parse([page({ currency: 'HKD', closing: '300.00', rows: [
+    row('01SEP', '31AUG', 'EXAMPLE SHOP TOKYO JP', '100.00', 140), [chunk('JPY 2000.00', 140, 150)],
+    row('02SEP', '01SEP', 'EXAMPLE SHOP HKG HK', '100.00', 170), [chunk('USD 12.50', 140, 180)],
+    row('03SEP', '02SEP', 'EXAMPLE SHOP MACAU MO', '100.00', 200), [chunk('ORIGINAL CURRENCY: HKD', 140, 210)],
+  ] })]);
+  assert.equal(result.sections[0].status, 'matched');
+  assert.equal(result.transactions.length, 3);
+  const rewards = calculateRewards(result.transactions, { today: '2026-10-16', hkdCnyRate: .85 });
+  assert.equal(rewards.world.pending, 0); assert.equal(rewards.world.used, moneyUnits('85.00'));
+  assert.equal(rewardMoney(rewards.world.cashback), '1.70'); assert.equal(rewards.pulse.used, 0n);
 });
 test('credits include repayments and refunds, never count balances or promotional text', () => {
   const result = parse([page({ opening: '200.00', closing: '87.50', rows: [row('01SEP', '31AUG', 'EXAMPLE STORE', '12.50', 140), row('02SEP', '01SEP', 'IFS PAYMENT - THANK YOU', '100.00CR', 155), row('03SEP', '02SEP', 'EXAMPLE REFUND', '25.00CR', 170)] })]);
