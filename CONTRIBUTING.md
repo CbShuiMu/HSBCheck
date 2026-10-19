@@ -26,4 +26,18 @@ npm run build
 
 ## 提交改动
 
+`main` 为稳定分支，日常开发统一在长期开发分支 `codex/develop` 上进行，不直接向 `main` 提交或推送。
+
+```bash
+git fetch origin
+git switch codex/develop
+git pull --ff-only
+```
+
+首次检出远程开发分支时，使用 `git switch --track origin/codex/develop`。
+
+提交说明遵循 Conventional Commits，例如 `fix(rewards): correct cashback calculation`。完成验证后将提交推送到 `codex/develop`，提供变更摘要和验证结果，等待维护者人工确认。确认无误后才创建从 `codex/develop` 到 `main` 的 PR；合并需维护者明确授权，不自动合并。
+
+合并后同步最新 `main` 到开发分支，再继续开发，保留长期开发分支。
+
 PR 请简述问题、改动后的行为和验证方式。提交前检查差异，不包含 `.qa/`、`.env*`、`.dev.vars*`、构建产物或凭据。贡献按本仓库的 [MIT 许可证](LICENSE) 提供。
