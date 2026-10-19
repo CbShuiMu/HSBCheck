@@ -1,12 +1,88 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ANNUAL_CAP, PULSE_HALF_YEAR_CAP, calculateRewards, groupRewardCards, hongKongToday, moneyUnits, paymentChannel, rewardMoney } from '../src/rewards.js';
+import { ANNUAL_CAP, PULSE_HALF_YEAR_CAP, calculateRewards, groupRewardCards, hongKongToday, moneyUnits, paymentChannel, rewardMoney, worldEligibility } from '../src/rewards.js';
 import { fetchHkdCnyRate, RATE_URL } from '../src/exchange-rate.js';
 import { mergeStatements } from '../src/statements.js';
 
 const today = '2026-10-16';
-const transaction = (patch = {}) => ({ id: '1', day: '2026-10-01', transactionDay: '2026-09-30', description: 'Alipay CHN CN', amount: '100.00', currency: 'CNY', direction: 'debit', category: 'spend', notes: [], ...patch });
+const transaction = (patch = {}) => ({ id: '1', day: '2026-10-01', transactionDay: '2026-09-30', description: 'Alipay CHN CN', merchantCountryCode: 'CN', amount: '100.00', currency: 'CNY', direction: 'debit', category: 'spend', notes: [], ...patch });
 const calculate = (items, settings = {}) => calculateRewards(items, { today, hkdCnyRate: .85, ...settings });
+
+test('world includes mainland, Macau and overseas, but rejects Hong Kong regardless of CNY', () => {
+  for (const merchantCountryCode of ['CN', 'CHN', '156', 'MO', 'MAC', '446', 'JP', 'JPN', '392', 'US', '840', 'GB', 'SG', 'ZA', 'ITA', 'ARE']) {
+    const item = transaction({ merchantCountryCode, notes: ['APPLE PAY'] });
+    const rewards = calculate([item]);
+    assert.equal(rewardMoney(rewards.world.cashback), '2.00', merchantCountryCode);
+    assert.equal(rewards.world.used, moneyUnits('100.00'));
+    assert.equal(rewards.pulse.used, ['CN', 'CHN', '156', 'MO', 'MAC', '446'].includes(merchantCountryCode) ? moneyUnits('100.00') : 0n);
+  }
+  for (const merchantCountryCode of ['HK', 'HKG', '344']) {
+    const rewards = calculate([transaction({ merchantCountryCode, notes: ['APPLE PAY'] })]);
+    assert.equal(rewards.world.used, 0n); assert.equal(rewards.pulse.used, 0n);
+    assert.equal(rewardMoney(rewards.totalCny), '0.40');
+  }
+});
+
+test('world reads statement country suffixes and continuation metadata; explicit country takes priority', () => {
+  for (const [description, notes, expected] of [
+    ['EXAMPLE SHOP TOKYO JP', [], true], ['EXAMPLE SHOP MAC', [], true],
+    ['ALIPAY CHN CN', [], true], ['EXAMPLE STORE', ['MERCHANT COUNTRY CODE: 446'], true],
+    ['ALIPAY HKG HK', [], false], ['EXAMPLE STORE', ['MERCHANT COUNTRY: HK'], false],
+    ['ALIPAY', [], null], ['UNIONPAY QR', [], null],
+  ]) {
+    assert.equal(worldEligibility(transaction({ merchantCountryCode: '', description, notes })).eligible, expected);
+  }
+  assert.equal(worldEligibility(transaction({ merchantCountryCode: 'HK', description: 'ALIPAY CHN CN' })).eligible, false);
+});
+
+test('foreign transactions billed in HKD earn world using billed amounts converted to CNY', () => {
+  for (const [merchantCountryCode, originalCurrency] of [['JP', 'JPY'], ['MO', 'MOP'], ['CN', 'CNY'], ['US', 'USD']]) {
+    const item = transaction({ currency: 'HKD', merchantCountryCode, originalCurrency, notes: ['APPLE PAY'] });
+    const rewards = calculate([item]);
+    assert.equal(rewardMoney(rewards.world.cashback), '1.70');
+    assert.equal(rewards.world.used, moneyUnits('85.00')); assert.equal(rewards.pulse.used, 0n);
+    assert.equal(rewardMoney(rewards.totalCny), '2.04');
+    assert.equal(paymentChannel(item).nominalRate, '2.4%');
+  }
+  const item = transaction({ currency: 'HKD', merchantCountryCode: 'JP', notes: ['JPY 2000.00'] });
+  assert.equal(rewardMoney(calculate([item]).world.cashback), '1.70');
+  assert.equal(worldEligibility({ ...item, notes: ['ORIGINAL CURRENCY: JPY'] }).eligible, true);
+});
+
+test('Hong Kong merchants and original HKD transactions never earn world, even with payment overrides', () => {
+  for (const patch of [{ currency: 'CNY', merchantCountryCode: 'HK' }, { currency: 'HKD', merchantCountryCode: 'US', originalCurrency: 'HKD' }, { currency: 'HKD', merchantCountryCode: 'HK', originalCurrency: 'USD' }]) {
+    const rewards = calculate([transaction(patch)], { overrides: { 1: { channel: 'applePay' } } });
+    assert.equal(rewards.world.used, 0n); assert.equal(rewards.pulse.used, 0n);
+  }
+});
+
+test('missing world metadata defers only world and can be confirmed independently of payment method', () => {
+  const item = transaction({ merchantCountryCode: '', description: 'ALIPAY' });
+  const pending = calculate([item]);
+  assert.equal(pending.world.pending, 1); assert.equal(pending.world.used, 0n);
+  assert.equal(rewardMoney(pending.base.totalCny), '0.40');
+  const overrides = { 1: { merchantRegion: 'macau' } };
+  assert.equal(rewardMoney(calculate([item], { overrides }).world.cashback), '2.00');
+  assert.equal(paymentChannel(item, 'auto', overrides[1]).nominalRate, '2.4%');
+  const hkBilled = { ...item, currency: 'HKD', merchantCountryCode: 'JP' };
+  assert.equal(calculate([hkBilled]).world.pending, 1);
+  assert.equal(rewardMoney(calculate([hkBilled], { overrides: { 1: { originalCurrency: 'FOREIGN' } } }).world.cashback), '1.70');
+  assert.equal(calculate([hkBilled], { overrides: { 1: { originalCurrency: 'HKD' } } }).world.used, 0n);
+});
+
+test('foreign HKD refunds claw back world without restoring allowance; missing FX remains unknown', () => {
+  const spend = transaction({ currency: 'HKD', merchantCountryCode: 'JP', originalCurrency: 'JPY' });
+  const refund = { ...spend, id: 'refund', direction: 'credit', category: 'credit' };
+  const rewards = calculate([spend, refund]);
+  assert.equal(rewards.world.used, moneyUnits('85.00')); assert.equal(rewards.world.cashback, 0n);
+  assert.equal(rewards.world.clawback, moneyUnits('1.70')); assert.equal(rewards.totalCny, 0n);
+  assert.equal(rewardMoney(calculate([spend, refund], { overrides: { refund: { refundBaseOnly: true } } }).world.cashback), '1.70');
+  const missingFx = calculate([spend], { hkdCnyRate: null });
+  assert.equal(missingFx.world.conversionPending, 1); assert.equal(missingFx.world.cashback, null); assert.equal(missingFx.totalCny, null);
+  for (const patch of [{ status: 'pending' }, { category: 'fee' }]) {
+    assert.equal(calculate([{ ...spend, ...patch }]).world.used, 0n);
+  }
+});
 
 test('ordinary CNY consumption returns 0.4% + 2%, without Pulse', () => {
   const rewards = calculate([transaction()]);
@@ -31,21 +107,38 @@ test('explicit UnionPay QR is eligible; generic UnionPay is not', () => {
   assert.equal(paymentChannel(transaction({ description: 'Unknown merchant' })).uncertain, true);
 });
 
-test('unrecognized payment methods earn no cashback and consume no allowance until confirmed', () => {
+test('unrecognized payment methods earn base and world as ordinary spend without consuming Pulse allowance', () => {
   const records = [transaction({ description: 'Unknown merchant', amount: '100000.00' })];
   const pending = calculate(records);
-  assert.equal(pending.pending, 1); assert.equal(pending.unknownChannels, 1);
-  assert.equal(pending.included, 0); assert.equal(pending.totalCny, 0n);
-  assert.equal(pending.base.cnyGross, 0n);
-  assert.equal(pending.world.used, 0n); assert.equal(pending.pulse.used, 0n);
-  assert.equal(pending.world.remaining, ANNUAL_CAP); assert.equal(pending.pulse.remaining, PULSE_HALF_YEAR_CAP);
+  assert.equal(pending.pending, 0); assert.equal(pending.unknownChannels, 1);
+  assert.equal(pending.included, 1); assert.equal(rewardMoney(pending.totalCny), '2400.00');
+  assert.equal(pending.base.cnyGross, moneyUnits('100000.00'));
+  assert.equal(pending.world.used, ANNUAL_CAP); assert.equal(pending.pulse.used, 0n);
+  assert.equal(pending.world.remaining, 0n); assert.equal(pending.pulse.remaining, PULSE_HALF_YEAR_CAP);
   for (const [channel, total, pulseUsed] of [['standard', '2400.00', 0n], ['applePay', '4000.00', PULSE_HALF_YEAR_CAP], ['unionpayQr', '4000.00', PULSE_HALF_YEAR_CAP]]) {
     const confirmed = calculate(records, { overrides: { 1: { channel } } });
     assert.equal(confirmed.pending, 0); assert.equal(confirmed.included, 1);
     assert.equal(rewardMoney(confirmed.totalCny), total);
     assert.equal(confirmed.world.used, ANNUAL_CAP); assert.equal(confirmed.pulse.used, pulseUsed);
   }
-  assert.equal(calculate(records, { overrides: { 1: { channel: 'auto' } } }).totalCny, 0n);
+  assert.equal(rewardMoney(calculate(records, { overrides: { 1: { channel: 'auto' } } }).totalCny), '2400.00');
+  assert.equal(calculate(records, { overrides: { 1: { channel: 'exclude' } } }).totalCny, 0n);
+});
+
+test('unrecognized mainland merchant descriptions automatically earn 2.4% and explicit QR still earns 4.4%', () => {
+  const item = transaction({ description: 'EXAMPLE WALLET CHN CN', merchantCountryCode: '', status: 'booked' });
+  const rewards = calculate([item]);
+  assert.equal(rewards.pending, 0); assert.equal(rewards.included, 1);
+  assert.equal(rewardMoney(rewards.base.totalCny), '0.40');
+  assert.equal(rewardMoney(rewards.world.cashback), '2.00');
+  assert.equal(rewardMoney(rewards.totalCny), '2.40');
+  assert.equal(paymentChannel(item).nominalRate, '2.4%'); assert.equal(rewards.pulse.used, 0n);
+  assert.equal(rewardMoney(calculate([{ ...item, notes: ['UNIONPAY QR'] }]).totalCny), '4.40');
+  assert.equal(calculate([{ ...item, status: 'pending' }]).totalCny, 0n);
+  const local = calculate([{ ...item, merchantCountryCode: 'HK' }]);
+  assert.equal(local.world.used, 0n); assert.equal(rewardMoney(local.totalCny), '0.40');
+  const unknownRegion = calculate([{ ...item, description: 'EXAMPLE WALLET' }]);
+  assert.equal(unknownRegion.world.pending, 1); assert.equal(rewardMoney(unknownRegion.totalCny), '0.40');
 });
 
 test('unposted transactions are excluded for both currencies even with a confirmed payment channel', () => {
@@ -58,12 +151,15 @@ test('unposted transactions are excluded for both currencies even with a confirm
   }
 });
 
-test('pending refunds do not claw back rewards until the transaction and payment method are confirmed', () => {
+test('posted refunds with unknown payment methods claw back base and world; unposted refunds remain excluded', () => {
   const spend = transaction({ id: 'spend', notes: ['APPLE PAY'] });
   const refund = transaction({ id: 'refund', description: 'Unknown refund', direction: 'credit', category: 'credit' });
   const pending = calculate([spend, refund]);
-  assert.equal(pending.pending, 1); assert.equal(rewardMoney(pending.totalCny), '4.40');
-  assert.equal(pending.base.cnyRefunds, 0n); assert.equal(pending.world.clawback, 0n); assert.equal(pending.pulse.clawback, 0n);
+  assert.equal(pending.pending, 0); assert.equal(rewardMoney(pending.totalCny), '2.00');
+  assert.equal(pending.base.cnyRefunds, moneyUnits('100.00')); assert.equal(pending.world.clawback, moneyUnits('2.00')); assert.equal(pending.pulse.clawback, 0n);
+  assert.equal(pending.uncertainRefunds, 1);
+  const baseOnly = calculate([spend, refund], { overrides: { refund: { refundBaseOnly: true } } });
+  assert.equal(rewardMoney(baseOnly.totalCny), '4.00'); assert.equal(baseOnly.world.clawback, 0n);
   const confirmed = calculate([spend, refund], { overrides: { refund: { channel: 'applePay' } } });
   assert.equal(confirmed.pending, 0); assert.equal(confirmed.totalCny, 0n);
   assert.equal(confirmed.world.used, moneyUnits('100.00')); assert.equal(confirmed.pulse.used, moneyUnits('100.00'));
@@ -74,7 +170,7 @@ test('pending refunds do not claw back rewards until the transaction and payment
 test('a pending entry in August and its confirmed entry in September earn cashback only once', () => {
   const august = transaction({ id: 'august', day: '2026-08-14', transactionDay: '2026-08-13', statementDate: '2026-08-14', status: 'pending', sources: [] });
   const september = { ...august, id: 'september', day: '2026-08-15', statementDate: '2026-09-14', status: 'booked' };
-  for (const first of [august, { ...august, status: 'booked', description: 'Unknown merchant' }]) {
+  for (const first of [august, { ...august, description: 'Unknown merchant' }]) {
     const { transactions } = mergeStatements([{ result: { transactions: [first] } }, { result: { transactions: [september] } }]);
     const rewards = calculate(transactions);
     assert.equal(transactions.length, 2); assert.equal(rewards.pending, 1); assert.equal(rewards.included, 1);
@@ -84,12 +180,12 @@ test('a pending entry in August and its confirmed entry in September earn cashba
 });
 
 test('pending spend cannot exhaust allowance needed by confirmed spend', () => {
-  const rewards = calculate([transaction({ id: 'pending', description: 'Unknown merchant', amount: '80000.00' }), transaction({ id: 'confirmed', amount: '500.00', notes: ['APPLE PAY'] })]);
+  const rewards = calculate([transaction({ id: 'pending', status: 'pending', description: 'Unknown merchant', amount: '80000.00' }), transaction({ id: 'confirmed', amount: '500.00', notes: ['APPLE PAY'] })]);
   assert.equal(rewardMoney(rewards.totalCny), '22.00');
   assert.equal(rewards.world.used, moneyUnits('500.00')); assert.equal(rewards.pulse.used, moneyUnits('500.00'));
 });
-test('HKD only receives 0.4% base reward, converted to CNY in the correct direction', () => {
-  const rewards = calculate([transaction({ currency: 'HKD', notes: ['APPLE PAY'] })]);
+test('local HKD receives 0.4% base reward, converted to CNY in the correct direction', () => {
+  const rewards = calculate([transaction({ currency: 'HKD', merchantCountryCode: 'HK', originalCurrency: 'HKD', notes: ['APPLE PAY'] })]);
   assert.equal(rewardMoney(rewards.base.hkd), '0.40');
   assert.equal(rewardMoney(rewards.base.totalCny), '0.34');
   assert.equal(rewards.world.used, 0n); assert.equal(rewards.pulse.used, 0n);

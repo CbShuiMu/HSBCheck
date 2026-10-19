@@ -24,6 +24,7 @@ const entries = [
 export const demoTransactions = entries.map(([day, description, amount, direction, currency], index) => ({
   id: `DEMO-${index}`, date: `${day}T00:00:00+08:00`, day, transactionDay: day,
   description, amount, direction: direction === 'Credit' ? 'credit' : 'debit', currency,
+  merchantCountryCode: currency === 'CNY' ? 'CN' : currency === 'USD' ? 'US' : 'HK',
   category: direction === 'Credit' ? (description.includes('还款') ? 'repayment' : 'credit') : 'spend',
   status: 'booked', bankStatus: '虚构示例', reference: `SAMPLE-${1000 + index}`,
 }));
