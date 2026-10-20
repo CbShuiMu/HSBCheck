@@ -27,7 +27,7 @@ export const CHANNELS = {
 };
 const transactionText = transaction => `${transaction.description || ''}\n${transaction.notes?.join('\n') || ''}`;
 const regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
-const countryAliases = { CHN: 'CN', '156': 'CN', HKG: 'HK', '344': 'HK', MAC: 'MO', '446': 'MO', JPN: 'JP', '392': 'JP', USA: 'US', '840': 'US', GBR: 'GB', SGP: 'SG', KOR: 'KR', THA: 'TH', TWN: 'TW', AUS: 'AU', CAN: 'CA', FRA: 'FR', DEU: 'DE', MYS: 'MY', NZL: 'NZ', ITA: 'IT', ESP: 'ES', PRT: 'PT', CHE: 'CH', AUT: 'AT', NLD: 'NL', BEL: 'BE', IRL: 'IE', SWE: 'SE', NOR: 'NO', DNK: 'DK', FIN: 'FI', GRC: 'GR', TUR: 'TR', ARE: 'AE', IDN: 'ID', VNM: 'VN', PHL: 'PH', IND: 'IN', ZAF: 'ZA', BRA: 'BR', MEX: 'MX' };
+const countryAliases = { CHN: 'CN', '156': 'CN', HKG: 'HK', '344': 'HK', MAC: 'MO', '446': 'MO', JPN: 'JP', '392': 'JP', USA: 'US', '840': 'US', GBR: 'GB', SGP: 'SG', KOR: 'KR', THA: 'TH', TWN: 'TW', AUS: 'AU', CAN: 'CA', FRA: 'FR', DEU: 'DE', MYS: 'MY', NZL: 'NZ', ITA: 'IT', ESP: 'ES', PRT: 'PT', CHE: 'CH', AUT: 'AT', NLD: 'NL', BEL: 'BE', IRL: 'IE', SWE: 'SE', NOR: 'NO', DNK: 'DK', FIN: 'FI', GRC: 'GR', TUR: 'TR', ARE: 'AE', IDN: 'ID', VNM: 'VN', KHM: 'KH', PHL: 'PH', IND: 'IN', ZAF: 'ZA', BRA: 'BR', MEX: 'MX' };
 function countryRegion(code) {
   const country = countryAliases[code] || code;
   if (!/^[A-Z]{2}$/.test(country) || regionNames.of(country) === country) return '';
@@ -35,18 +35,24 @@ function countryRegion(code) {
 }
 export function worldEligibility(transaction, override = {}) {
   const text = transactionText(transaction);
-  // 优先使用明确的商户国家代码；描述只读取末尾地区代码，不用钱包名称推断地区。
+  const lines = text.toUpperCase().split('\n').map(line => line.trim());
+  // 原币种和金额可紧接国家代码，也可在续行；金额不用于返现计算。
+  const currencyAmount = /\b([A-Z]{3})\s+\d[\d,]*(?:\.\d+)?$/;
+  // 优先使用明确的商户国家代码；仅从行尾（可带原币种金额）读取地区。
   const explicitCountry = String(transaction.merchantCountryCode || '').trim().toUpperCase();
   const country = explicitCountry || text.match(/\bMERCHANT\s+COUNTRY(?:\s+CODE)?\s*[:=]\s*([A-Z]{2,3}|\d{3})\b/i)?.[1]?.toUpperCase()
-    || text.split('\n').map(line => line.trim().toUpperCase().match(/\b([A-Z]{2,3})$/)?.[1]).find(code => countryRegion(code)) || '';
+    || lines.map(line => line.replace(currencyAmount, '').trim().match(/\b([A-Z]{2,3})$/)?.[1]).find(code => countryRegion(code)) || '';
   const region = ['hongKong', 'mainland', 'macau', 'overseas'].includes(override.merchantRegion) ? override.merchantRegion : countryRegion(country);
   // 双币结单的 currency 为入账币种；海外外币可能已折算为 HKD。
   const originalCurrency = (override.originalCurrency || transaction.originalCurrency || text.match(/\b(?:ORIGINAL\s+(?:TRANSACTION\s+)?CURRENCY|TRANSACTION\s+CURRENCY)\s*[:=]?\s*([A-Z]{3})\b/i)?.[1]?.toUpperCase()
-    || text.match(/\b(USD|EUR|GBP|JPY|MOP|CNY|RMB|HKD|AUD|CAD|SGD|THB|KRW|TWD|MYR)\s+[\d,]+\.\d{2}\b/)?.[1]
+    || lines.map(line => line.match(currencyAmount)?.[1]).find(Boolean)
     || (transaction.currency !== 'HKD' ? transaction.currency : '')).toUpperCase();
-  const foreign = originalCurrency && originalCurrency !== 'HKD';
-  const eligible = region === 'hongKong' || originalCurrency === 'HKD' ? false : !region || !originalCurrency ? null : !!foreign;
-  const reason = eligible === true ? '香港以外商户的外币交易，计入赏世界 5x' : eligible === false ? '香港商户或原交易为港币，不计赏世界' : '商户地区或原交易币种待确认，暂不计赏世界';
+  // 未找到汇丰公开的完整结单国家代码表，按用户口径兜底：非香港默认计赏世界。
+  // 不以 HKD 入账币种当作原币种；明确的原交易港币信息及手动修正仍优先。
+  const eligible = region !== 'hongKong' && originalCurrency !== 'HKD';
+  const reason = !eligible ? '香港商户或原交易为港币，不计赏世界'
+    : !region || !originalCurrency ? '未识别为香港商户，按非 HKG HK 规则默认计入赏世界 5x，可手动修正'
+    : '香港以外商户的外币交易，计入赏世界 5x';
   return { region, originalCurrency, eligible, reason };
 }
 export function rewardExclusionReason(transaction) {
@@ -72,7 +78,7 @@ export function paymentChannel(transaction, override = 'auto', details = {}) {
   const pulse = channel.pulse && transaction.currency === 'CNY' && ['mainland', 'macau'].includes(world.region) && world.eligible === true;
   const nominalRate = channel.key === 'exclude' ? '0%' : `${0.4 + (world.eligible ? 2 : 0) + (pulse ? 2 : 0)}%`;
   return { ...channel, pulse, world, nominalRate,
-    label: channel.key !== 'exclude' && transaction.currency === 'HKD' && world.eligible ? '海外外币消费' : channel.label };
+    label: channel.key !== 'exclude' && transaction.currency === 'HKD' && world.eligible ? '非香港消费' : channel.label };
 }
 
 export function isPendingTransaction(transaction) {

@@ -61,6 +61,19 @@ test('parsed overseas foreign spend in the HKD sub-account earns world while loc
   assert.equal(rewards.world.pending, 0); assert.equal(rewards.world.used, moneyUnits('85.00'));
   assert.equal(rewardMoney(rewards.world.cashback), '1.70'); assert.equal(rewards.pulse.used, 0n);
 });
+
+test('parsed country and currency suffixes plus unknown merchants follow the non-Hong-Kong fallback', () => {
+  const result = parse([page({ currency: 'HKD', closing: '300.00', rows: [
+    row('01SEP', '31AUG', 'EXAMPLE STORE KHM KH USD 6.75', '100.00', 140),
+    row('02SEP', '01SEP', 'EXAMPLE SHOP HKG HK USD 12.50', '100.00', 170),
+    row('03SEP', '02SEP', 'EXAMPLE UNKNOWN SHOP', '100.00', 200),
+  ] })]);
+  assert.equal(result.sections[0].status, 'matched'); assert.equal(result.warnings.length, 0);
+  const rewards = calculateRewards(result.transactions, { today: '2026-10-16', hkdCnyRate: .85 });
+  assert.equal(rewards.world.pending, 0); assert.equal(rewards.world.used, moneyUnits('170.00'));
+  assert.equal(rewardMoney(rewards.world.cashback), '3.40');
+  assert.equal(rewardMoney(rewards.totalCny), '4.42'); assert.equal(rewards.pulse.used, 0n);
+});
 test('credits include repayments and refunds, never count balances or promotional text', () => {
   const result = parse([page({ opening: '200.00', closing: '87.50', rows: [row('01SEP', '31AUG', 'EXAMPLE STORE', '12.50', 140), row('02SEP', '01SEP', 'IFS PAYMENT - THANK YOU', '100.00CR', 155), row('03SEP', '02SEP', 'EXAMPLE REFUND', '25.00CR', 170)] })]);
   assert.equal(result.transactions.length, 3); assert.equal(result.transactions[1].category, 'repayment');

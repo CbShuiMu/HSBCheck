@@ -28,7 +28,7 @@ test('world reads statement country suffixes and continuation metadata; explicit
     ['EXAMPLE SHOP TOKYO JP', [], true], ['EXAMPLE SHOP MAC', [], true],
     ['ALIPAY CHN CN', [], true], ['EXAMPLE STORE', ['MERCHANT COUNTRY CODE: 446'], true],
     ['ALIPAY HKG HK', [], false], ['EXAMPLE STORE', ['MERCHANT COUNTRY: HK'], false],
-    ['ALIPAY', [], null], ['UNIONPAY QR', [], null],
+    ['ALIPAY', [], true], ['UNIONPAY QR', [], true],
   ]) {
     assert.equal(worldEligibility(transaction({ merchantCountryCode: '', description, notes })).eligible, expected);
   }
@@ -56,18 +56,64 @@ test('Hong Kong merchants and original HKD transactions never earn world, even w
   }
 });
 
-test('missing world metadata defers only world and can be confirmed independently of payment method', () => {
+test('missing world metadata defaults to world and manual region or currency corrections take priority', () => {
   const item = transaction({ merchantCountryCode: '', description: 'ALIPAY' });
   const pending = calculate([item]);
-  assert.equal(pending.world.pending, 1); assert.equal(pending.world.used, 0n);
+  assert.equal(pending.world.pending, 0); assert.equal(pending.world.used, moneyUnits('100.00'));
   assert.equal(rewardMoney(pending.base.totalCny), '0.40');
+  assert.equal(rewardMoney(pending.totalCny), '2.40');
+  assert.equal(pending.pulse.used, 0n);
+  assert.match(worldEligibility(item).reason, /默认计入/);
   const overrides = { 1: { merchantRegion: 'macau' } };
   assert.equal(rewardMoney(calculate([item], { overrides }).world.cashback), '2.00');
   assert.equal(paymentChannel(item, 'auto', overrides[1]).nominalRate, '2.4%');
   const hkBilled = { ...item, currency: 'HKD', merchantCountryCode: 'JP' };
-  assert.equal(calculate([hkBilled]).world.pending, 1);
+  assert.equal(calculate([hkBilled]).world.pending, 0);
+  assert.equal(rewardMoney(calculate([hkBilled]).totalCny), '2.04');
   assert.equal(rewardMoney(calculate([hkBilled], { overrides: { 1: { originalCurrency: 'FOREIGN' } } }).world.cashback), '1.70');
   assert.equal(calculate([hkBilled], { overrides: { 1: { originalCurrency: 'HKD' } } }).world.used, 0n);
+  assert.equal(calculate([item], { overrides: { 1: { merchantRegion: 'hongKong' } } }).world.used, 0n);
+  assert.equal(worldEligibility({ ...item, description: 'EXAMPLE HKG HK' }, { merchantRegion: 'overseas' }).eligible, true);
+});
+
+test('statement suffixes read country before optional currency and amount using fictional merchants', () => {
+  for (const [description, currency, region, originalCurrency, eligible] of [
+    ['EXAMPLE METRO CHN CN', 'CNY', 'mainland', 'CNY', true],
+    ['EXAMPLE TRAVEL HKG HK', 'HKD', 'hongKong', '', false],
+    ['EXAMPLE RIDE GBR GB GBP 7.25', 'HKD', 'overseas', 'GBP', true],
+    ['EXAMPLE STORE MAC MO MOP 82.00', 'HKD', 'macau', 'MOP', true],
+    ['EXAMPLE CAFE VNM VN VND 123,456.00', 'HKD', 'overseas', 'VND', true],
+    ['EXAMPLE PHARMACY KHM KH USD 6.75', 'HKD', 'overseas', 'USD', true],
+    ['EXAMPLE SHOP KHM KH KHR 25000', 'HKD', 'overseas', 'KHR', true],
+    ['example shop hkg   hk usd 6.75', 'HKD', 'hongKong', 'USD', false],
+    ['EXAMPLE SHOP HKG HK', 'CNY', 'hongKong', 'CNY', false],
+  ]) {
+    const item = transaction({ merchantCountryCode: '', description, currency });
+    const world = worldEligibility(item);
+    assert.deepEqual([world.region, world.originalCurrency, world.eligible], [region, originalCurrency, eligible], description);
+    const rewards = calculate([item]);
+    assert.equal(rewardMoney(rewards.totalCny), eligible ? currency === 'CNY' ? '2.40' : '2.04' : currency === 'CNY' ? '0.40' : '0.34', description);
+    assert.equal(rewards.pulse.used, 0n);
+  }
+  const item = transaction({ merchantCountryCode: '', description: 'EXAMPLE STORE', currency: 'HKD', notes: ['HKG HK USD 6.75'] });
+  assert.equal(worldEligibility(item).eligible, false);
+  assert.equal(worldEligibility({ ...item, merchantCountryCode: 'CN' }).eligible, true);
+  assert.equal(worldEligibility({ ...item, description: 'EXAMPLE CN SHOP', notes: ['KHM KH', 'USD 6.75'] }).region, 'overseas');
+});
+
+test('unknown country codes default to world without being treated as mainland or Macau for Pulse', () => {
+  for (const merchantCountryCode of ['', 'XXX', 'KHM']) {
+    const item = transaction({ merchantCountryCode, description: 'EXAMPLE STORE', notes: ['APPLE PAY'] });
+    const rewards = calculate([item]);
+    assert.equal(rewardMoney(rewards.totalCny), '2.40');
+    assert.equal(rewards.world.used, moneyUnits('100.00')); assert.equal(rewards.pulse.used, 0n);
+  }
+  const spend = transaction({ merchantCountryCode: '', description: 'EXAMPLE STORE', currency: 'HKD' });
+  const refund = { ...spend, id: 'refund', direction: 'credit', category: 'credit' };
+  const rewards = calculate([spend, refund]);
+  assert.equal(rewards.totalCny, 0n); assert.equal(rewards.world.used, moneyUnits('85.00'));
+  assert.equal(rewardMoney(rewards.world.clawback), '1.70');
+  assert.equal(calculate([spend], { hkdCnyRate: null }).world.cashback, null);
 });
 
 test('foreign HKD refunds claw back world without restoring allowance; missing FX remains unknown', () => {
@@ -138,7 +184,7 @@ test('unrecognized mainland merchant descriptions automatically earn 2.4% and ex
   const local = calculate([{ ...item, merchantCountryCode: 'HK' }]);
   assert.equal(local.world.used, 0n); assert.equal(rewardMoney(local.totalCny), '0.40');
   const unknownRegion = calculate([{ ...item, description: 'EXAMPLE WALLET' }]);
-  assert.equal(unknownRegion.world.pending, 1); assert.equal(rewardMoney(unknownRegion.totalCny), '0.40');
+  assert.equal(unknownRegion.world.pending, 0); assert.equal(rewardMoney(unknownRegion.totalCny), '2.40');
 });
 
 test('unposted transactions are excluded for both currencies even with a confirmed payment channel', () => {
@@ -321,7 +367,8 @@ test('other currencies do not silently use the HKD or CNY rules', () => {
 test('missing exchange rate leaves HKD conversion unknown while CNY bonus and allowance remain available', () => {
   const rewards = calculate([transaction(), transaction({ id: 'hk', currency: 'HKD' })], { hkdCnyRate: null });
   assert.equal(rewards.base.totalCny, null); assert.equal(rewards.totalCny, null);
-  assert.equal(rewardMoney(rewards.world.cashback), '2.00');
+  assert.equal(rewards.world.cashback, null); assert.equal(rewards.world.conversionPending, 1);
+  assert.equal(rewards.world.used, moneyUnits('100.00'));
   assert.equal(rewardMoney(calculate([transaction()], { hkdCnyRate: null }).totalCny), '2.40');
 });
 test('monetary rounding happens after aggregation and negative net cashback is bounded at zero', () => {
