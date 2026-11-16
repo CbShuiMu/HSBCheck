@@ -11,7 +11,7 @@ function Allowance({ title, pool, scope = '年度消费额度' }) {
     <div className="allowance-label"><span>{scope}</span><strong>{pool.progress.toFixed(1)}%</strong></div>
     <div className="reward-progress" role="progressbar" aria-label={`${title}${scope}`} aria-valuemin={0} aria-valuemax={Number(pool.cap) / 100000} aria-valuenow={Number(pool.used) / 100000} aria-valuetext={`已占用 ${amount(pool.used)} 人民币，本期额度 ${amount(pool.cap)} 人民币`}><span style={{ width: `${pool.progress}%` }}/></div>
     <div className="allowance-amount"><span>CNY {amount(pool.used)}</span><span>/ {amount(pool.cap)}</span></div>
-    <p>剩余额度 CNY {amount(pool.remaining)}{pool.overCap > 0n ? ` · 已超出 ${amount(pool.overCap)}` : ''}</p>
+    <p>剩余额度 CNY {amount(pool.remaining)}{pool.overCap > 0n ? ` · 入账时超额 CNY ${amount(pool.overCap)}` : ''}</p>
   </div>;
 }
 
@@ -49,11 +49,11 @@ function CardRewards({ card, records, overrides, hasData, demo, today, exchange,
     </div>
     {showRate && <div className="reward-rate-row"><div>{exchange.loading ? <><LoaderCircle size={13} className="spin"/><span>正在获取 HKD/CNY 参考汇率</span></> : exchange.value ? <><span>1 HKD = <strong>{exchange.value.rate}</strong> CNY</span><span className="rate-date">{exchange.value.date} 参考汇率{stale ? '（较旧）' : ''}</span><a href={RATE_SOURCE} target="_blank" rel="noreferrer">Frankfurter<ExternalLink size={10}/></a></> : <><AlertCircle size={13}/><span>参考汇率不可用，港币部分暂不折算</span></>}</div><button onClick={refresh} disabled={exchange.loading} aria-label="刷新汇率"><RefreshCw size={13}/><span>刷新汇率</span></button></div>}
     {exchange.error && <p className="rate-error" role="status">{exchange.error}{exchange.value ? `；沿用 ${exchange.value.date} 的参考汇率。` : '。人民币返现和两个额度仍可计算。'}</p>}
-    <p className="rewards-scope">仅累计本卡已导入结单中的今年记录，主副卡分别计算，不受下方筛选影响。尚未入账的交易不计返现，也不占用额度；仅支付方式未识别时按普通消费计算。退款扣回返现但不恢复两项额度；还款、费用不计返现。</p>
+    <p className="rewards-scope">仅累计本卡已导入结单中的今年记录，主副卡分别计算，不受下方筛选影响。尚未入账的交易不计返现和额度；仅支付方式未识别时按普通消费计算。合资格退款入账后扣回相应返现，并恢复赏世界年度额度。PULSE 半年额度按退款前的消费累计。还款、费用不计返现。</p>
     {(rewards.pending > 0 || rewards.uncertainRefunds > 0) && <p className="reward-review"><AlertCircle size={13}/><span>{rewards.pending > 0 ? `${rewards.pending} 笔交易尚未入账，暂不计返现，也不占用年度额度。` : ''}{rewards.uncertainRefunds > 0 ? `${rewards.uncertainRefunds} 笔退款暂按普通渠道扣回返现，请在交易详情核对原支付方式。` : ''}</span></p>}
     {rewards.unknownChannels > 0 && <p className="rewards-scope">{rewards.unknownChannels} 笔支付方式未识别的消费已按普通消费计算基础返现及符合条件的赏世界奖赏，未计 PULSE 专属奖赏；可在详情修正支付方式。</p>}
     {rewards.world.pending > 0 && <p className="reward-review">{rewards.world.pending} 笔商户地区或原交易币种待确认，暂不计赏世界奖赏及额度；请在交易详情核对。</p>}
     {rewards.otherCurrency > 0 && <p className="rewards-scope">另有 {rewards.otherCurrency} 笔其他币种交易未纳入本规则。</p>}
-    <details className="reward-rules"><summary><CircleHelp size={13}/>返现规则与计算口径</summary><div><p>按您设定的规则估算，非银行确认到账金额。赏世界按非 HKG HK 规则估算：中国内地、澳门及海外交易计入，地区或原币种未识别时也默认计入；已识别为香港商户或明确原交易为港币的消费不计。港币子账户的入账币种不代表原交易币种。符合渠道条件的内地及澳门人民币消费再加 PULSE 专属 2%。普通 Tenpay、Alipay、UnionPay 不自动视为银联 QR。每张主卡和副卡独立统计三项返现及额度：赏世界年度消费上限 CNY 100,000；PULSE 每半年消费上限 CNY 80,000，于 1 月 1 日和 7 月 1 日刷新；基础返现无上限。</p><p>额度按退款前的消费累计占用。赏世界额外返现＝年度封顶内消费 × 2%－对应退款 × 2%；PULSE 今年返现＝两个半年各自封顶内消费之和 × 2%－专属渠道退款 × 2%，最低为 0。PULSE 进度条只显示当前半年，退款不会释放任何期间的额度。退款未关联原消费，按可见标记及手动修正的支付方式扣回。若原消费已超额未获额外返现，可在该退款详情选择“仅扣基础返现”。</p><p>港币子账户的基础返现及合资格赏世界消费按公开 HKD/CNY 日参考汇率折合人民币；未找到汇丰公开的完整结单国家代码表，因此采用非香港默认计入的估算口径；可在交易详情手动修正地区和原交易币种。当前汇率并非银行实际结算汇率。未导入月份、无法识别的交易或支付标记可能影响估算；跨年原消费的退款也需核对。</p></div></details>
+    <details className="reward-rules"><summary><CircleHelp size={13}/>返现规则与计算口径</summary><div><p>按您设定的规则估算，非银行确认到账金额。赏世界按非 HKG HK 规则估算：中国内地、澳门及海外交易计入，地区或原币种未识别时也默认计入；已识别为香港商户或明确原交易为港币的消费不计。港币子账户的入账币种不代表原交易币种。符合渠道条件的内地及澳门人民币消费再加 PULSE 专属 2%。普通 Tenpay、Alipay、UnionPay 不自动视为银联 QR。每张主卡和副卡独立统计三项返现及额度：赏世界年度消费上限 CNY 100,000；PULSE 每半年消费上限 CNY 80,000，于 1 月 1 日和 7 月 1 日刷新；基础返现无上限。</p><p>赏世界按入账顺序估算。退款最多释放当时已占用的额度，并扣回相应的 2% 返现。释放的额度可用于后续消费。PULSE 今年返现＝两个半年各自封顶内消费之和 × 2%－合资格专属退款 × 2%，最低为 0。PULSE 进度条只显示当前半年，半年额度按退款前消费累计。退款按结单标记和手动修正的支付方式处理。若原消费已超额且两项额外奖赏均未获得，可在退款详情选择“仅扣基础返现”。</p><p>港币子账户的基础返现及合资格赏世界消费按公开 HKD/CNY 日参考汇率折合人民币；未找到汇丰公开的完整结单国家代码表，因此采用非香港默认计入的估算口径；可在交易详情手动修正地区和原交易币种。当前汇率并非银行实际结算汇率。未导入月份、无法识别的交易或支付标记可能影响估算；跨年原消费的退款也需核对。</p></div></details>
   </section>;
 }
