@@ -90,12 +90,8 @@ export function rewardPendingReason(transaction) {
   return '';
 }
 
-function bonusPool(gross, refunds, cap = ANNUAL_CAP) {
-  // 退款扣回返现，但不释放按累计消费占用的额度；扣回金额不超过已赚取返现。
-  const used = minimum(gross, cap);
-  const beforeRefund = used * 2n / 100n;
-  const clawback = minimum(beforeRefund, refunds * 2n / 100n);
-  return { gross, cap, used, refunds, remaining: cap - used, overCap: nonnegative(gross - cap), beforeRefund, clawback, cashback: beforeRefund - clawback, progress: Number(used) / Number(cap) * 100 };
+function allowance(cap, used, overCap) {
+  return { cap, used, remaining: cap - used, overCap, progress: Number(used) / Number(cap) * 100 };
 }
 
 export function groupRewardCards(transactions, cards = []) {
@@ -121,13 +117,18 @@ export function calculateRewards(transactions, { today = hongKongToday(), hkdCny
   const pulseSpend = [0n, 0n];
   let cnyGross = 0n, cnyRefunds = 0n, hkdGross = 0n, hkdRefunds = 0n;
   let pulseGross = 0n, worldGross = 0n, worldRefunds = 0n, pulseRefunds = 0n;
+  let worldRewarded = 0n, worldReleased = 0n;
   let worldPending = 0, worldConversionPending = 0;
   const validRate = typeof hkdCnyRate === 'number' && Number.isFinite(hkdCnyRate) && hkdCnyRate > 0 && hkdCnyRate < 1000;
   const rate = validRate ? BigInt(Math.round(hkdCnyRate * Number(FX_SCALE))) : null;
   const toCny = amount => rate ? (amount * rate + FX_SCALE / 2n) / FX_SCALE : null;
   let included = 0, pending = 0, unknownChannels = 0, uncertainRefunds = 0, excluded = 0, otherCurrency = 0;
-  for (const transaction of transactions) {
-    if (!transaction.day || transaction.day < start || transaction.day > today) continue;
+  const yearlyTransactions = transactions.filter(({ day }) => day && day >= start && day <= today);
+  // 结单没有入账时间。同一入账日先按交易日排序，两个日期都相同时先计消费。
+  yearlyTransactions.sort((a, b) => a.day.localeCompare(b.day)
+    || (a.transactionDay || a.day).localeCompare(b.transactionDay || b.day)
+    || Number(a.direction === 'credit') - Number(b.direction === 'credit'));
+  for (const transaction of yearlyTransactions) {
     if (!['CNY', 'HKD'].includes(transaction.currency)) { otherCurrency++; continue; }
     const override = overrides[transaction.id] || {};
     const channel = paymentChannel(transaction, override.channel, override);
@@ -147,8 +148,13 @@ export function calculateRewards(transactions, { today = hongKongToday(), hkdCny
     if (channel.world.eligible && (!credit || !override.refundBaseOnly)) {
       const worldAmount = transaction.currency === 'HKD' ? toCny(amount) : amount;
       if (worldAmount === null) worldConversionPending++;
-      else if (credit) worldRefunds += worldAmount;
-      else worldGross += worldAmount;
+      else if (credit) {
+        worldRefunds += worldAmount;
+        worldReleased += minimum(worldAmount, worldRewarded - worldReleased);
+      } else {
+        worldGross += worldAmount;
+        worldRewarded += minimum(worldAmount, ANNUAL_CAP - (worldRewarded - worldReleased));
+      }
     }
     if (transaction.currency === 'HKD') {
       if (credit) hkdRefunds += amount; else hkdGross += amount;
@@ -173,14 +179,22 @@ export function calculateRewards(transactions, { today = hongKongToday(), hkdCny
   // 没有可靠汇率时保留 null，避免把无法折算的港币返现显示为零。
   const hkdConvertedCny = hkdBase === 0n ? 0n : rate ? (hkdBase * rate + FX_SCALE / 2n) / FX_SCALE : null;
   const baseTotal = hkdConvertedCny === null ? null : cnyBase + hkdConvertedCny;
-  const world = { ...bonusPool(worldGross, worldRefunds), pending: worldPending, conversionPending: worldConversionPending };
-  if (worldConversionPending) world.cashback = null;
-  const periods = pulseSpend.map((gross, index) => ({
-    ...bonusPool(gross, 0n, PULSE_HALF_YEAR_CAP),
-    start: index ? july : start,
-    end: `${today.slice(0, 4)}-${index ? '12-31' : '06-30'}`,
-    label: index ? '下半年' : '上半年',
-  }));
+  const worldUsed = worldRewarded - worldReleased;
+  const worldBeforeRefund = worldRewarded * 2n / 100n;
+  const worldCashback = worldUsed * 2n / 100n;
+  const world = { ...allowance(ANNUAL_CAP, worldUsed, worldGross - worldRewarded),
+    gross: worldGross, refunds: worldRefunds, beforeRefund: worldBeforeRefund,
+    clawback: worldBeforeRefund - worldCashback, cashback: worldConversionPending ? null : worldCashback,
+    pending: worldPending, conversionPending: worldConversionPending };
+  const periods = pulseSpend.map((gross, index) => {
+    const used = minimum(gross, PULSE_HALF_YEAR_CAP);
+    const cashback = used * 2n / 100n;
+    return { ...allowance(PULSE_HALF_YEAR_CAP, used, gross - used), gross, refunds: 0n,
+      beforeRefund: cashback, clawback: 0n, cashback,
+      start: index ? july : start,
+      end: `${today.slice(0, 4)}-${index ? '12-31' : '06-30'}`,
+      label: index ? '下半年' : '上半年' };
+  });
   const pulseBeforeRefund = periods.reduce((total, period) => total + period.beforeRefund, 0n);
   const pulseClawback = minimum(pulseBeforeRefund, pulseRefunds * 2n / 100n);
   // 全年返现累加两个独立封顶的半年；跨半年退款扣回全年返现，仍不释放任一半年额度。

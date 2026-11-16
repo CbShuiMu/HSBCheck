@@ -111,16 +111,17 @@ test('unknown country codes default to world without being treated as mainland o
   const spend = transaction({ merchantCountryCode: '', description: 'EXAMPLE STORE', currency: 'HKD' });
   const refund = { ...spend, id: 'refund', direction: 'credit', category: 'credit' };
   const rewards = calculate([spend, refund]);
-  assert.equal(rewards.totalCny, 0n); assert.equal(rewards.world.used, moneyUnits('85.00'));
+  assert.equal(rewards.totalCny, 0n); assert.equal(rewards.world.used, 0n);
   assert.equal(rewardMoney(rewards.world.clawback), '1.70');
   assert.equal(calculate([spend], { hkdCnyRate: null }).world.cashback, null);
 });
 
-test('foreign HKD refunds claw back world without restoring allowance; missing FX remains unknown', () => {
+test('foreign HKD refunds claw back World cashback and restore converted allowance; missing FX remains unknown', () => {
   const spend = transaction({ currency: 'HKD', merchantCountryCode: 'JP', originalCurrency: 'JPY' });
   const refund = { ...spend, id: 'refund', direction: 'credit', category: 'credit' };
   const rewards = calculate([spend, refund]);
-  assert.equal(rewards.world.used, moneyUnits('85.00')); assert.equal(rewards.world.cashback, 0n);
+  assert.equal(rewards.world.used, 0n); assert.equal(rewards.world.remaining, ANNUAL_CAP);
+  assert.equal(rewards.world.cashback, 0n);
   assert.equal(rewards.world.clawback, moneyUnits('1.70')); assert.equal(rewards.totalCny, 0n);
   assert.equal(rewardMoney(calculate([spend, refund], { overrides: { refund: { refundBaseOnly: true } } }).world.cashback), '1.70');
   const missingFx = calculate([spend], { hkdCnyRate: null });
@@ -208,9 +209,10 @@ test('posted refunds with unknown payment methods claw back base and world; unpo
   assert.equal(rewardMoney(baseOnly.totalCny), '4.00'); assert.equal(baseOnly.world.clawback, 0n);
   const confirmed = calculate([spend, refund], { overrides: { refund: { channel: 'applePay' } } });
   assert.equal(confirmed.pending, 0); assert.equal(confirmed.totalCny, 0n);
-  assert.equal(confirmed.world.used, moneyUnits('100.00')); assert.equal(confirmed.pulse.used, moneyUnits('100.00'));
+  assert.equal(confirmed.world.used, 0n); assert.equal(confirmed.pulse.used, moneyUnits('100.00'));
   const unposted = calculate([spend, { ...refund, status: 'pending', notes: ['APPLE PAY'] }], { overrides: { refund: { channel: 'applePay' } } });
   assert.equal(rewardMoney(unposted.totalCny), '4.40');
+  assert.equal(unposted.world.used, moneyUnits('100.00'));
 });
 
 test('a pending entry in August and its confirmed entry in September earn cashback only once', () => {
@@ -294,6 +296,7 @@ test('Pulse uses posting date at the half-year boundary and refunds never restor
   const refund = transaction({ id: 'refund', day: '2026-07-01', direction: 'credit', category: 'credit', amount: '10000.00', notes: ['APPLE PAY'] });
   const rewards = calculate([spend, refund]);
   assert.equal(rewardMoney(rewards.pulse.cashback), '1400.00');
+  assert.equal(rewards.world.remaining, moneyUnits('30000.00'));
   assert.equal(rewards.pulse.periods[0].remaining, 0n); assert.equal(rewards.pulse.remaining, PULSE_HALF_YEAR_CAP);
   const boundary = calculate([transaction({ day: '2026-07-01', transactionDay: '2026-06-30', notes: ['APPLE PAY'] })]);
   assert.equal(boundary.pulse.periods[0].used, 0n); assert.equal(boundary.pulse.periods[1].used, moneyUnits('100.00'));
@@ -311,7 +314,7 @@ test('primary and supplementary cards have independent base, world and half-year
   assert.deepEqual(groups.map(group => group.type), ['primary', 'supplementary', 'supplementary']);
   const [main, first, second] = groups.map(group => calculate(group.records));
   assert.equal(rewardMoney(main.totalCny), '4000.00'); assert.equal(rewardMoney(first.totalCny), '4003.40');
-  assert.equal(second.totalCny, 0n); assert.equal(second.world.used, moneyUnits('100.00'));
+  assert.equal(second.totalCny, 0n); assert.equal(second.world.used, 0n);
   assert.equal(main.world.used, ANNUAL_CAP); assert.equal(first.world.used, ANNUAL_CAP);
   const corrected = calculate(groups[2].records, { overrides: { sup2: { channel: 'exclude' }, refund: { channel: 'exclude' } } });
   assert.equal(corrected.world.used, 0n); assert.equal(calculate(groups[0].records).world.used, ANNUAL_CAP);
@@ -323,17 +326,40 @@ test('card grouping retains zero-spend cards, combines currency metadata and sup
   assert.equal(groups.length, 2); assert.equal(groups[0].last4, '2222'); assert.equal(groups[1].records.length, 0);
   assert.equal(groupRewardCards([]).length, 1); assert.equal(groupRewardCards([transaction()])[0].records.length, 1);
 });
-test('a complete refund removes cashback but never releases either allowance', () => {
-  const rewards = calculate([transaction({ notes: ['APPLE PAY'] }), transaction({ id: '2', notes: ['APPLE PAY'], category: 'credit', direction: 'credit' })]);
-  assert.equal(rewards.world.used, moneyUnits('100.00')); assert.equal(rewards.pulse.used, moneyUnits('100.00'));
-  assert.equal(rewards.world.remaining, moneyUnits('99900.00')); assert.equal(rewards.pulse.remaining, moneyUnits('79900.00'));
+test('a complete Pulse refund claws back both rewards and restores only the World annual allowance', () => {
+  const spend = transaction({ notes: ['APPLE PAY'] });
+  const refund = transaction({ id: 'refund', notes: ['APPLE PAY'], category: 'credit', direction: 'credit' });
+  const rewards = calculate([refund, spend]);
+  assert.equal(rewards.world.used, 0n); assert.equal(rewards.pulse.used, moneyUnits('100.00'));
+  assert.equal(rewards.world.remaining, ANNUAL_CAP); assert.equal(rewards.pulse.remaining, moneyUnits('79900.00'));
+  assert.equal(rewards.world.clawback, moneyUnits('2.00')); assert.equal(rewards.pulse.clawback, moneyUnits('2.00'));
   assert.equal(rewards.totalCny, 0n);
 });
-test('refunded capped spend cannot create new bonus allowance for later consumption', () => {
-  const rewards = calculate([transaction({ amount: '100000.00', notes: ['APPLE PAY'] }), transaction({ id: 'refund', amount: '20000.00', category: 'credit', direction: 'credit', notes: ['APPLE PAY'] }), transaction({ id: 'later', amount: '20000.00', notes: ['APPLE PAY'] })]);
+test('a partial refund after reaching the World cap releases allowance for later spend only', () => {
+  const spend = transaction({ amount: '100000.00', notes: ['APPLE PAY'] });
+  const refund = transaction({ id: 'refund', day: '2026-10-03', amount: '20000.00', category: 'credit', direction: 'credit', notes: ['APPLE PAY'] });
+  const later = transaction({ id: 'later', day: '2026-10-04', amount: '20000.00', notes: ['APPLE PAY'] });
+  const afterRefund = calculate([spend, refund]);
+  assert.equal(afterRefund.world.remaining, moneyUnits('20000.00'));
+  assert.equal(rewardMoney(afterRefund.world.cashback), '1600.00');
+  const rewards = calculate([later, refund, spend]);
   assert.equal(rewards.world.used, ANNUAL_CAP); assert.equal(rewards.world.remaining, 0n);
-  assert.equal(rewardMoney(rewards.world.cashback), '1600.00'); assert.equal(rewardMoney(rewards.pulse.cashback), '1200.00');
+  assert.equal(rewardMoney(rewards.world.cashback), '2000.00'); assert.equal(rewardMoney(rewards.pulse.cashback), '1200.00');
+  assert.equal(rewards.pulse.remaining, 0n);
   assert.equal(rewardMoney(rewards.base.totalCny), '400.00');
+  const beforeRefund = calculate([later, { ...refund, day: '2026-10-05' }, spend]);
+  assert.equal(beforeRefund.world.remaining, moneyUnits('20000.00'));
+  assert.equal(beforeRefund.world.overCap, moneyUnits('20000.00'));
+  assert.equal(rewardMoney(beforeRefund.world.cashback), '1600.00');
+});
+test('World releases only occupied allowance and skips ineligible refunds', () => {
+  const spend = transaction({ day: '2026-10-02' });
+  const refund = transaction({ id: 'refund', day: '2026-10-03', amount: '150.00', category: 'credit', direction: 'credit' });
+  assert.equal(calculate([spend, refund]).world.clawback, moneyUnits('2.00'));
+  assert.equal(calculate([spend, { ...refund, merchantCountryCode: 'HK' }]).world.remaining, moneyUnits('99900.00'));
+  const beforeSpend = calculate([spend, { ...refund, day: '2026-10-01' }]);
+  assert.equal(beforeSpend.world.used, moneyUnits('100.00'));
+  assert.equal(beforeSpend.world.clawback, 0n);
 });
 test('refund of an originally ineligible over-cap purchase can claw back only base', () => {
   const records = [transaction({ amount: '120000.00', notes: ['APPLE PAY'] }), transaction({ id: 'refund', amount: '20000.00', category: 'credit', direction: 'credit', notes: ['APPLE PAY'] })];
